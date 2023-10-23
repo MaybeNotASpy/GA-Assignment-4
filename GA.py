@@ -2,14 +2,84 @@ from individual import Individual
 from problem import Problem
 from coding import decode
 import numpy as np
-from enum import Enum
+import deal
+from copy import copy
 
 generator = np.random.default_rng()
 
 
-class IncestPreventionMethod(Enum):
-    HAMMING_DISTANCE = "hamming_distance"
-    EDGEWISE_DISTANCE = "edgewise_distance"
+class RunLog():
+    """
+    A class to log the results of a run.
+    """
+    def __init__(self):
+        self.generation: list[int] = []
+        self.avg_fitness: list[float] = []
+        self.best_fitness: list[float] = []
+        self.avg_cost: list[float] = []
+        self.best_cost: list[float] = []
+        self.evals: list[int] = []
+        self.best: Individual = None
+        self.final_gen: int = None
+        self._run_number: int = None
+
+    def log_run(self,
+                generation: int,
+                avg_fitness: float,
+                best_fitness: float,
+                avg_cost: float,
+                best_cost: float,
+                evals: int):
+        """
+        Log the results of a generation.
+
+        Args:
+            generation (int): The generation number.
+            avg_fitness (float): The average fitness.
+            best_fitness (float): The best fitness.
+            avg_cost (float): The average cost.
+            best_cost (float): The best cost.
+            evals (int): The number of evaluations.
+        """
+        self.generation.append(generation)
+        self.avg_fitness.append(avg_fitness)
+        self.best_fitness.append(best_fitness)
+        self.avg_cost.append(avg_cost)
+        self.best_cost.append(best_cost)
+        self.evals.append(evals)
+
+    def log_run_end(self,
+                    best: Individual,
+                    final_gen: int):
+        """
+        Log the results of the run.
+
+        Args:
+            best (Individual): The best individual.
+            final_gen (int): The number of generations.
+        """
+        self.best = best
+        self.final_gen = final_gen
+
+    @property
+    def run_number(self):
+        """
+        Get the run number.
+
+        Returns:
+            int: The run number.
+        """
+        return self._run_number
+
+    @run_number.setter
+    def run_number(self, value):
+        """
+        Set the run number.
+
+        Args:
+            value (int): The run number.
+        """
+        self._run_number = value
 
 
 class GA():
@@ -17,28 +87,22 @@ class GA():
     The genetic algorithm.
 
     Args:
-        incest_prevention_method (IncestPreventionMethod): The method of
-            incest prevention.
         perc_default_min_distance (float): The percentage of the maximum
             possible distance between two individuals in the population
             to use as the default minimum distance for crossover.
-            If None, the default minimum distance is
-            len(population[0].get_chromosome()) / 4.
+        id (int): The id of the GA.
     """
+    @deal.pre(lambda self, perc_default_min_distance, id = 0: 0 <= perc_default_min_distance <= 1) # noqa
     def __init__(self,
-                 incest_prevention_method=IncestPreventionMethod.EDGEWISE_DISTANCE,  # noqa
-                 perc_default_min_distance: float | None = None,
+                 perc_default_min_distance: float,
                  id: int = 0):
-        self._incest_prevention_method = incest_prevention_method
-        assert 0 <= perc_default_min_distance <= 1 or \
-            perc_default_min_distance is None
         self.perc_default_min_distance = perc_default_min_distance
         self.id = id
 
     def initial_distance(self, population: list[Individual]) -> float:
         """
-        Calculate the initial distance between the individuals in the
-        population.
+        Calculate the initial distance between two individuals
+        in the population.
 
         Args:
             population (list[Individual]): The population.
@@ -46,13 +110,7 @@ class GA():
         Returns:
             float: The initial distance.
         """
-        if self.perc_default_min_distance is not None:
-            # Return the percentage of the maximum possible distance
-            # Max possible distance is the number of edges in the
-            # chromosome (number of genes - 1).
-            return self.perc_default_min_distance * \
-                (population[0].get_number_of_genes() - 1)
-        return len(population[0].get_chromosome()) / 4
+        return self.perc_default_min_distance * population[0].num_of_genes
 
     def incest_prevention(
             self,
@@ -69,12 +127,8 @@ class GA():
         Returns:
             bool: True if the parents are too similar, False otherwise.
         """
-        if self._incest_prevention_method == IncestPreventionMethod.HAMMING_DISTANCE: # noqa
-            return parent1.get_chromosome().hamming_distance(
-                parent2.get_chromosome()) / 2 < min_distance
-        elif self._incest_prevention_method == IncestPreventionMethod.EDGEWISE_DISTANCE: # noqa
-            return parent1.get_chromosome().edgewise_distance(
-                parent2.get_chromosome()) < min_distance
+        return parent1.chromosome.edgewise_distance(
+            parent2.chromosome) < min_distance
 
     def evaluate(self,
                  population: list[Individual],
@@ -87,10 +141,10 @@ class GA():
             problem (Problem): The problem to solve.
         """
         for individual in population:
-            tour = decode(individual.get_chromosome())
+            tour = decode(individual.chromosome)
             fitness, cost = problem.evaluate(tour)
-            individual.set_fitness(fitness)
-            individual.set_cost(cost)
+            individual.fitness = fitness
+            individual.cost = cost
 
     def crossover(self,
                   parents: list[Individual],
@@ -142,7 +196,8 @@ class GA():
             population_size: int = 100,
             max_generations: int = 100,
             mutation_rate: float = 0.01,
-            num_of_nodes: int = 10) -> tuple[Individual, int]:
+            num_of_nodes: int = 10,
+            allow_convergence: bool = True) -> RunLog:
         """
         Args:
             problem (Problem): The problem to solve.
@@ -150,6 +205,8 @@ class GA():
             max_generations (int): The maximum number of generations.
             mutation_rate (float): The probability of mutation.
             num_of_nodes (int): The number of nodes in the TSP.
+            allow_convergence (bool): Whether or not to allow the
+                algorithm to converge.
 
         Returns:
             Individual: The best individual.
@@ -164,6 +221,8 @@ class GA():
         prev_gen_stats = (-1, -1, -1)
         gens_without_change = 0
         min_distance = self.initial_distance(population)
+        run_log = RunLog()
+        running_evals = 0
         # Main loop
         while generation < max_generations:
             # Crossover
@@ -175,10 +234,11 @@ class GA():
                 min_distance -= 1
             # Evaluate fitness
             self.evaluate(children, problem)
+            running_evals += len(children)
             # Select the best individuals from the population
             # and the children
             population = sorted(population + children,
-                                key=lambda x: x.get_fitness(),
+                                key=lambda x: x.fitness,
                                 reverse=True)[:population_size]
             # Mutation
             if min_distance <= 0:
@@ -187,37 +247,41 @@ class GA():
                 # rest of the population
                 min_distance = self.initial_distance(population)
                 population = sorted(population,
-                                    key=lambda x: x.get_fitness(),
+                                    key=lambda x: x.fitness,
                                     reverse=True)
                 population[1:] = self.mutate(population[1:], mutation_rate)
-            elif gens_without_change > 0.1 * max_generations and gens_without_change > 100: # noqa
+            elif allow_convergence \
+                and gens_without_change > 0.1 * max_generations \
+                    and gens_without_change > 100:
                 print("Converged!")
                 break
 
-            # Check if the population changed
-            best_fitness = population[0].get_fitness()
-            avg_fitness = np.mean([i.get_fitness() for i in population])
-            worst_fitness = population[-1].get_fitness()
-            if (best_fitness, avg_fitness, worst_fitness) == prev_gen_stats:
-                gens_without_change += 1
-            else:
-                gens_without_change = 0
+            best_fitness = population[0].fitness
+            avg_fitness = np.mean([i.fitness for i in population])
+            if allow_convergence:
+                # Check if the population changed
+                worst_fitness = population[-1].fitness
+                if (best_fitness, avg_fitness, worst_fitness) == prev_gen_stats:
+                    gens_without_change += 1
+                else:
+                    gens_without_change = 0
 
-            def get_unique_chromosomes(population: list[Individual]):
-                res = []
-                for individual in population:
-                    chromosome = str(individual.get_chromosome())
-                    if chromosome not in res:
-                        res.append(chromosome)
-                return res
-
-            prev_gen_stats = (best_fitness, avg_fitness, worst_fitness)
+                prev_gen_stats = (best_fitness, avg_fitness, worst_fitness)
             generation += 1
             if generation % 100 == 0:
                 print(f"Run {self.id} generation {generation}: {best_fitness}")
+
+            # Log the results of the generation
+            run_log.log_run(generation,
+                            avg_fitness,
+                            best_fitness,
+                            np.mean([i.cost for i in population]),
+                            population[0].cost,
+                            copy(running_evals))
         # end while
-        # Return the best individual and the number of generations
-        return (sorted(population,
-                       key=lambda x: x.get_fitness(),
-                       reverse=True)[0],
-                generation)
+        # Log the results of the run
+        best = sorted(population,
+                      key=lambda x: x.fitness,
+                      reverse=True)[0]
+        run_log.log_run_end(best, generation)
+        return run_log
